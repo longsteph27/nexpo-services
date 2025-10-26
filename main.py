@@ -3,6 +3,8 @@ from pydantic import BaseModel
 import qrcode
 import io
 import base64
+import hashlib
+from datetime import datetime
 
 app = FastAPI(title="QR Code Generator API", version="1.0.0")
 
@@ -11,6 +13,7 @@ class QRCodeRequest(BaseModel):
 
 class QRCodeResponse(BaseModel):
     qr_code_base64: str
+    file_name: str
     success: bool
     message: str
 
@@ -46,8 +49,14 @@ async def generate_qr_code(request: QRCodeRequest):
         buffer.seek(0)
         img_base64 = base64.b64encode(buffer.getvalue()).decode()
         
+        # Tạo tên file từ hash của nội dung và timestamp
+        text_hash = hashlib.md5(request.text.encode()).hexdigest()[:8]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_name = f"qr_{text_hash}_{timestamp}.png"
+        
         return QRCodeResponse(
             qr_code_base64=img_base64,
+            file_name=file_name,
             success=True,
             message="QR code được tạo thành công"
         )
