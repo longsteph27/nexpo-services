@@ -99,9 +99,9 @@ async def generate_qr_code(request: QRCodeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi tạo QR code: {str(e)}")
 
-def generate_qr_code_base64(content_qr: str) -> str:
+def generate_qr_code_bytes(content_qr: str) -> bytes:
     """
-    Tạo QR code từ content_qr và trả về base64 string
+    Tạo QR code từ content_qr và trả về PNG bytes
     """
     qr = qrcode.QRCode(
         version=1,
@@ -111,40 +111,35 @@ def generate_qr_code_base64(content_qr: str) -> str:
     )
     qr.add_data(content_qr)
     qr.make(fit=True)
-    
     img = qr.make_image(fill_color="black", back_color="white")
-    
     buffer = io.BytesIO()
     img.save(buffer, format='PNG')
     buffer.seek(0)
-    img_base64 = base64.b64encode(buffer.getvalue()).decode()
-    
-    return img_base64
+    return buffer.getvalue()
 
-def append_qr_to_html(html: str, qr_base64: str) -> str:
+def append_qr_cid_to_html(html: str) -> str:
     """
-    Gắn QR code image vào dưới cùng của HTML
+    Gắn thẻ img CID vào cuối HTML — QR sẽ được gửi kèm dưới dạng inline attachment
     """
-    qr_img_tag = f'<div style="text-align: center; margin-top: 20px;"><img src="data:image/png;base64,{qr_base64}" alt="QR Code" /></div>'
-    
-    # Tìm vị trí đóng body tag và chèn QR code trước đó
+    qr_img_tag = (
+        '<div style="text-align:center;margin:24px 0;">'
+        '<img src="cid:qrcode.png" alt="QR Code" '
+        'style="width:200px;height:200px;border:1px solid #ccc;border-radius:8px;" />'
+        '</div>'
+    )
     if '</body>' in html:
-        html = html.replace('</body>', f'{qr_img_tag}</body>')
+        return html.replace('</body>', f'{qr_img_tag}</body>')
     elif '</html>' in html:
-        html = html.replace('</html>', f'{qr_img_tag}</html>')
-    else:
-        # Nếu không có body tag, append vào cuối
-        html = html + qr_img_tag
-    
-    return html
+        return html.replace('</html>', f'{qr_img_tag}</html>')
+    return html + qr_img_tag
 
 @app.post("/send-email-with-qr", response_model=EmailResponse)
 async def send_email_with_qr(request: EmailRequest):
     """
-    Nhận thông tin email, tạo QR code từ content_qr, gắn vào HTML và gửi email qua Mailgun
+    Nhận thông tin email, tạo QR code từ content_qr,
+    gửi qua Mailgun với QR đính kèm inline (CID) — hoạt động trên Gmail
     """
     try:
-        # Validate input
         if not request.from_email.strip():
             raise HTTPException(status_code=400, detail="from_email không được để trống")
         if not request.to.strip():
@@ -153,16 +148,15 @@ async def send_email_with_qr(request: EmailRequest):
             raise HTTPException(status_code=400, detail="subject không được để trống")
         if not request.content_qr.strip():
             raise HTTPException(status_code=400, detail="content_qr không được để trống")
-        
-        # Tạo QR code và chuyển sang base64
-        qr_base64 = generate_qr_code_base64(request.content_qr)
-        
-        # Gắn QR code vào HTML
-        html_with_qr = append_qr_to_html(request.html, qr_base64)
-        
-        # Gửi email qua Mailgun
+
         if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
-            raise HTTPException(status_code=500, detail="Mailgun chưa được cấu hình (MAILGUN_API_KEY, MAILGUN_DOMAIN)")
+            raise HTTPException(status_code=500, detail="Mailgun chưa được cấu hình")
+
+        # Tạo QR PNG bytes
+        qr_bytes = generate_qr_code_bytes(request.content_qr)
+
+        # Gắn <img src="cid:qrcode.png"> vào HTML
+        html_with_qr = append_qr_cid_to_html(request.html)
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -175,6 +169,9 @@ async def send_email_with_qr(request: EmailRequest):
                         "subject": request.subject,
                         "html": html_with_qr,
                     },
+                    files=[
+                        ("inline", ("qrcode.png", qr_bytes, "image/png")),
+                    ],
                 )
                 response.raise_for_status()
                 result = response.json()
@@ -190,7 +187,7 @@ async def send_email_with_qr(request: EmailRequest):
                 status_code=500,
                 detail=f"Lỗi khi gửi email qua Mailgun: {e.response.status_code} - {e.response.text[:200]}"
             )
-        
+
     except HTTPException:
         raise
     except Exception as e:
