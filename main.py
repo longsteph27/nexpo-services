@@ -117,13 +117,79 @@ def generate_qr_code_bytes(content_qr: str) -> bytes:
     buffer.seek(0)
     return buffer.getvalue()
 
+def inject_qr_extras(html: str, content_qr: str) -> str:
+    """
+    Inject UUID display text + Insight Hub button right after the QR img tag.
+    If the extras are already injected (idempotent), skip.
+    """
+    import re
+    insight_url = f"https://insight.nexpo.vn/{content_qr}"
+    if insight_url in html:
+        return html  # already injected
+
+    extras = (
+        # UUID display
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">'
+        '<tr><td align="center">'
+        '<p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:1px;'
+        'text-transform:uppercase;color:#64748B;font-family:\'Segoe UI\',Arial,sans-serif;">'
+        'M&#227; &#273;&#259;ng k&#253; / Registration ID</p>'
+        f'<p style="margin:0;font-size:13px;font-family:\'Courier New\',monospace;'
+        f'color:#1E293B;background:#F1F5F9;padding:6px 14px;border-radius:6px;'
+        f'letter-spacing:0.5px;display:inline-block;">{content_qr}</p>'
+        '</td></tr>'
+        # Insight Hub button
+        '<tr><td align="center" style="padding-top:20px;">'
+        f'<a href="{insight_url}" target="_blank" '
+        'style="display:inline-block;background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);'
+        'color:#FFFFFF;text-decoration:none;font-size:14px;font-weight:700;'
+        'font-family:\'Segoe UI\',Arial,sans-serif;padding:12px 28px;border-radius:8px;'
+        'letter-spacing:0.3px;">'
+        'Access Insight Hub&nbsp;|&nbsp;Tr&#7909;y c&#7853;p C&#7893;ng th&#244;ng tin s&#7921; ki&#7879;n'
+        '</a>'
+        '</td></tr>'
+        '</table>'
+    )
+
+    # Insert right after the QR img tag (find closing > of the img)
+    qr_img_pattern = re.compile(
+        r'(<img[^>]*src=["\']cid:qrcode\.png["\'][^>]*/?>)',
+        re.IGNORECASE,
+    )
+    match = qr_img_pattern.search(html)
+    if match:
+        insert_pos = match.end()
+        return html[:insert_pos] + extras + html[insert_pos:]
+
+    # Fallback: insert before </body>
+    if '</body>' in html:
+        return html.replace('</body>', f'{extras}</body>', 1)
+    return html + extras
+
+
 def append_qr_cid_to_html(html: str) -> str:
     """
     Gắn thẻ img CID vào cuối HTML — QR sẽ được gửi kèm dưới dạng inline attachment.
     Nếu template đã có cid:qrcode.png ở đúng vị trí thì không append thêm.
     """
+    import re
+    # Strip any extra QR img tags — keep only the first one to avoid duplicates
+    qr_pattern = re.compile(
+        r'<(?:div[^>]*>\s*)?<img[^>]*src=["\']cid:qrcode\.png["\'][^>]*/?>(?:\s*</div>)?',
+        re.IGNORECASE,
+    )
+    matches = qr_pattern.findall(html)
+    if len(matches) > 1:
+        # Remove all occurrences, then re-insert the first one before </body>
+        html_stripped = qr_pattern.sub('', html)
+        first_tag = matches[0]
+        if '</body>' in html_stripped:
+            return html_stripped.replace('</body>', f'{first_tag}</body>', 1)
+        elif '</html>' in html_stripped:
+            return html_stripped.replace('</html>', f'{first_tag}</html>', 1)
+        return html_stripped + first_tag
     if 'cid:qrcode.png' in html:
-        return html  # template already has QR at the right position
+        return html  # template already has exactly one QR at the right position
     qr_img_tag = (
         '<div style="text-align:center;margin:24px 0;">'
         '<img src="cid:qrcode.png" alt="QR Code" '
@@ -131,9 +197,9 @@ def append_qr_cid_to_html(html: str) -> str:
         '</div>'
     )
     if '</body>' in html:
-        return html.replace('</body>', f'{qr_img_tag}</body>')
+        return html.replace('</body>', f'{qr_img_tag}</body>', 1)
     elif '</html>' in html:
-        return html.replace('</html>', f'{qr_img_tag}</html>')
+        return html.replace('</html>', f'{qr_img_tag}</html>', 1)
     return html + qr_img_tag
 
 @app.post("/send-email-with-qr", response_model=EmailResponse)
@@ -160,6 +226,9 @@ async def send_email_with_qr(request: EmailRequest):
 
         # Gắn <img src="cid:qrcode.png"> vào HTML
         html_with_qr = append_qr_cid_to_html(request.html)
+
+        # Inject UUID display + Insight Hub button right after QR img tag
+        html_with_qr = inject_qr_extras(html_with_qr, request.content_qr)
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
